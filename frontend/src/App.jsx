@@ -7,7 +7,7 @@ import {
 
 // Wichtig: API-Endpoint zeigt jetzt auf den Backend-Proxy, nicht direkt zu Anthropic
 const API_URL = "/api/messages";
-const MODEL = "claude-sonnet-4-20250514";
+const MODEL = "claude-sonnet-4-5";
 
 const LANGUAGES = [
   { code: "en", name: "Englisch",       native: "English",    flag: "🇬🇧", bcp47: "en-GB" },
