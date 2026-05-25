@@ -1,0 +1,29 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    container_name: sprachlern-backend
+    restart: unless-stopped
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-*}
+    expose:
+      - "8000"
+    networks:
+      - sprachlern-net
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: sprachlern-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    depends_on:
+      - backend
+    networks:
+      - sprachlern-net
+
+networks:
+  sprachlern-net:
+    driver: bridge
