@@ -4,9 +4,8 @@ services:
       context: ./backend
     container_name: sprachlern-backend
     restart: unless-stopped
-    environment:
-      - ANTHROPIC_API_KEY
-      - ALLOWED_ORIGINS
+    env_file:
+      - .env
     expose:
       - "8000"
     networks:
