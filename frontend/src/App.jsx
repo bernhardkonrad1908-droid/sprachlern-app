@@ -99,7 +99,9 @@ export default function App() {
   const recognitionModeRef = useRef(null);
   const userStoppedRef = useRef(false);      // True wenn User Mic manuell stoppt
   const inputBaseRef = useRef("");           // Bisher gesammelter Input vor letztem Restart
-  const lastTranscriptRef = useRef("");      // Letzter transcript der aktuellen Session
+  const sessionFinalRef = useRef("");        // Finale Transcripts der aktuellen Recognition-Session
+  const sessionInterimRef = useRef("");      // Letzter Interim-Transcript der aktuellen Session
+  const restartCooldownRef = useRef(0);      // Timestamp, bis wann Results nach Restart ignoriert werden
   const speechSupported = typeof window !== "undefined" &&
     (window.SpeechRecognition || window.webkitSpeechRecognition);
   const ttsSupported = typeof window !== "undefined" && "speechSynthesis" in window;
@@ -133,14 +135,36 @@ export default function App() {
     rec.interimResults = true;
     rec.maxAlternatives = 1;
     rec.onresult = (event) => {
-      const transcript = Array.from(event.results)
-        .map((r) => r[0].transcript).join("");
-      lastTranscriptRef.current = transcript;
-      if (recognitionModeRef.current === "input") {
-        setInput(inputBaseRef.current + transcript);
+      // Cooldown nach Restart: erste 500ms Results ignorieren (Echo-Schutz)
+      if (Date.now() < restartCooldownRef.current) return;
+
+      // Nur NEUE results ab resultIndex auswerten
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+        const text = result[0].transcript;
+        if (result.isFinal) {
+          sessionFinalRef.current += (sessionFinalRef.current && !sessionFinalRef.current.endsWith(" ") ? " " : "") + text.trim();
+        }
       }
-      else if (recognitionModeRef.current === "shadowing")
+      // Aktuellster Interim-Block: letzter non-final transcript
+      let interim = "";
+      for (let i = event.results.length - 1; i >= 0; i--) {
+        if (!event.results[i].isFinal) interim = event.results[i][0].transcript;
+        else break;
+      }
+      sessionInterimRef.current = interim;
+
+      if (recognitionModeRef.current === "input") {
+        const combined = sessionFinalRef.current
+          + (sessionFinalRef.current && interim && !sessionFinalRef.current.endsWith(" ") ? " " : "")
+          + interim;
+        setInput(inputBaseRef.current + combined);
+      }
+      else if (recognitionModeRef.current === "shadowing") {
+        const transcript = Array.from(event.results)
+          .map((r) => r[0].transcript).join("");
         setShadowing((prev) => prev ? { ...prev, transcript } : prev);
+      }
     };
     rec.onend = () => {
       if (recognitionModeRef.current === "shadowing") {
@@ -153,12 +177,17 @@ export default function App() {
         recognitionModeRef.current = null;
         return;
       }
-      // Input-Mode: bei unfreiwilligem Browser-Cut (Stille-Timeout) auto-restart
+      // Input-Mode: bei unfreiwilligem Browser-Cut auto-restart
       if (recognitionModeRef.current === "input" && !userStoppedRef.current) {
-        // bisherigen transcript in Base übernehmen
-        inputBaseRef.current = inputBaseRef.current + lastTranscriptRef.current
-          + (lastTranscriptRef.current && !lastTranscriptRef.current.endsWith(" ") ? " " : "");
-        lastTranscriptRef.current = "";
+        // Final-Text der gerade beendeten Session in Base persistieren
+        if (sessionFinalRef.current) {
+          inputBaseRef.current = inputBaseRef.current + sessionFinalRef.current
+            + (sessionFinalRef.current.endsWith(" ") ? "" : " ");
+        }
+        sessionFinalRef.current = "";
+        sessionInterimRef.current = "";
+        // Cooldown setzen: erste 500ms nach Restart Audio-Echo ignorieren
+        restartCooldownRef.current = Date.now() + 500;
         setTimeout(() => {
           if (recognitionRef.current && !userStoppedRef.current
               && recognitionModeRef.current === "input") {
@@ -167,7 +196,7 @@ export default function App() {
               recognitionModeRef.current = null;
             }
           }
-        }, 150);
+        }, 250);
         return; // recording bleibt true → UI zeigt weiter Aufnahme an
       }
       setRecording(false);
@@ -394,7 +423,9 @@ Verhalten:
       // Bestehenden Input erhalten (z.B. wenn User schon was getippt hatte)
       const existing = input.trim();
       inputBaseRef.current = existing ? existing + " " : "";
-      lastTranscriptRef.current = "";
+      sessionFinalRef.current = "";
+      sessionInterimRef.current = "";
+      restartCooldownRef.current = 0;
       recognitionRef.current.continuous = true;  // Input: läuft bis User stoppt
       recognitionRef.current.lang = translateMode ? "de-DE" : language.bcp47;
       recognitionRef.current.start();
