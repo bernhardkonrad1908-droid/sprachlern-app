@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import {
   Send, Sparkles, Globe2, Languages, RotateCcw, Loader2, BookOpen,
   Mic, Volume2, VolumeX, BookMarked, MessageSquare, X, Plus, Check, Trash2,
-  Headphones, RefreshCw, Award, ArrowRightLeft,
+  Headphones, RefreshCw, Award, ArrowRightLeft, Save, ListMusic,
 } from "lucide-react";
 
 // Wichtig: API-Endpoint zeigt jetzt auf den Backend-Proxy, nicht direkt zu Anthropic
@@ -91,6 +91,10 @@ export default function App() {
   const [autoSpeak, setAutoSpeak] = useState(true);
   const [translateMode, setTranslateMode] = useState(false);
   const [translatingInput, setTranslatingInput] = useState(false);
+  const [phraseMode, setPhraseMode] = useState(false);
+  const [creatingPhrase, setCreatingPhrase] = useState(false);
+  const [currentPhrase, setCurrentPhrase] = useState(null); // {id, german, target}
+  const [phrases, setPhrases] = useState([]);
 
   const [recording, setRecording] = useState(false);
   const [speakingId, setSpeakingId] = useState(null);
@@ -127,6 +131,17 @@ export default function App() {
   useEffect(() => {
     try { localStorage.setItem("vocab", JSON.stringify(vocab)); } catch {}
   }, [vocab]);
+
+  // Phrasen-Persistenz
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem("phrases_v1");
+      if (stored) setPhrases(JSON.parse(stored));
+    } catch {}
+  }, []);
+  useEffect(() => {
+    try { localStorage.setItem("phrases_v1", JSON.stringify(phrases)); } catch {}
+  }, [phrases]);
 
   // Recognition
   useEffect(() => {
@@ -424,6 +439,70 @@ Verhalten:
     } finally {
       setLoading(false);
     }
+  };
+
+  // PHRASEN: erstelle eine übersetzte Phrasenkarte (kein Chat)
+  const createPhrase = async () => {
+    if (!input.trim() || creatingPhrase) return;
+    if (recording) { userStoppedRef.current = true; recognitionRef.current?.stop(); }
+    const german = dedupConsecutiveWords(input.trim());
+    setCreatingPhrase(true);
+    setInput("");
+    try {
+      const sys = `Du bist ein präziser Übersetzer für Sprachlerner. Übersetze den folgenden deutschen Text ins ${language.native}, natürlich und idiomatisch auf Niveau ${level.code} (${level.name}). Wenn es eine typische Alltagsphrase ist, nimm die natürlichste Form, die ein Muttersprachler verwenden würde. Antworte AUSSCHLIESSLICH mit der Übersetzung, ohne Anführungszeichen, ohne Erklärung.`;
+      const translated = await callClaude([{ role: "user", content: german }], sys);
+      const target = translated.trim();
+      const phrase = {
+        id: `phrase-${Date.now()}`,
+        german,
+        target,
+        languageCode: language.code,
+        languageNative: language.native,
+        languageFlag: language.flag,
+        levelCode: level.code,
+        bcp47: language.bcp47,
+      };
+      setCurrentPhrase(phrase);
+      // Auto-TTS
+      if (ttsSupported && autoSpeak) speakInternal(target, "phrase-tts", 0.9);
+    } catch {
+      setInput(german); // zurücksetzen damit User nochmal versuchen kann
+    } finally {
+      setCreatingPhrase(false);
+    }
+  };
+
+  const savePhrase = () => {
+    if (!currentPhrase) return;
+    // Vermeide Duplikate (gleiches german + target schon vorhanden)
+    const exists = phrases.some(p =>
+      p.german.toLowerCase() === currentPhrase.german.toLowerCase()
+      && p.target.toLowerCase() === currentPhrase.target.toLowerCase()
+    );
+    if (!exists) {
+      setPhrases(prev => [{ ...currentPhrase, savedAt: Date.now() }, ...prev]);
+    }
+    setCurrentPhrase(null);
+  };
+
+  const discardPhrase = () => {
+    if (ttsSupported) window.speechSynthesis.cancel();
+    setCurrentPhrase(null);
+  };
+
+  const removePhrase = (id) => {
+    setPhrases(prev => prev.filter(p => p.id !== id));
+  };
+
+  const togglePhraseMode = () => {
+    const next = !phraseMode;
+    setPhraseMode(next);
+    if (next) setTranslateMode(true); // Phrase-Mode aktiviert DE→IT automatisch
+  };
+
+  const handleSubmit = () => {
+    if (phraseMode) createPhrase();
+    else sendMessage();
   };
 
   const translate = async (idx, text) => {
@@ -780,6 +859,15 @@ Antworte AUSSCHLIESSLICH mit dem JSON, ohne Markdown.`;
                   </span>
                 )}
               </button>
+              <button onClick={() => setActiveTab("phrases")}
+                className={`p-2 rounded-full transition-all relative ${activeTab === "phrases" ? "bg-[#1F2A20] text-[#F5EFE2]" : "text-[#5C5547] hover:bg-[#1F2A20]/10"}`}>
+                <ListMusic size={18} />
+                {phrases.filter(p => p.languageCode === language.code).length > 0 && (
+                  <span className="absolute -top-0.5 -right-0.5 bg-[#2D4A36] text-[#F5EFE2] text-[10px] font-bold rounded-full min-w-[18px] h-[18px] px-1 flex items-center justify-center">
+                    {phrases.filter(p => p.languageCode === language.code).length}
+                  </span>
+                )}
+              </button>
               <button onClick={resetAll}
                 className="p-2 rounded-full hover:bg-[#1F2A20]/10 transition-colors text-[#5C5547]">
                 <RotateCcw size={18} />
@@ -963,7 +1051,7 @@ Antworte AUSSCHLIESSLICH mit dem JSON, ohne Markdown.`;
                 <div className="flex gap-2 items-end max-w-3xl mx-auto">
                   {speechSupported && (
                     <button onClick={toggleMic}
-                      disabled={loading || (shadowing && shadowing.phase !== "done")}
+                      disabled={loading || creatingPhrase || (shadowing && shadowing.phase !== "done")}
                       className={`p-3 rounded-2xl shadow-md transition-all flex-shrink-0 ${
                         recording && recognitionModeRef.current === "input"
                           ? "bg-[#C8612D] text-[#F5EFE2] pulse-ring"
@@ -974,7 +1062,7 @@ Antworte AUSSCHLIESSLICH mit dem JSON, ohne Markdown.`;
                     </button>
                   )}
                   <button onClick={() => setTranslateMode(!translateMode)}
-                    disabled={loading || translatingInput}
+                    disabled={loading || translatingInput || creatingPhrase || phraseMode}
                     className={`p-3 rounded-2xl shadow-md transition-all flex-shrink-0 ${
                       translateMode
                         ? "bg-[#2D4A36] text-[#F5EFE2]"
@@ -983,28 +1071,44 @@ Antworte AUSSCHLIESSLICH mit dem JSON, ohne Markdown.`;
                     title={translateMode ? `Deutsch → ${language.native} an` : "Deutsch tippen/sprechen, automatisch übersetzen"}>
                     <span className="text-[11px] font-bold tracking-wider">DE→{language.code.toUpperCase()}</span>
                   </button>
+                  <button onClick={togglePhraseMode}
+                    disabled={loading || translatingInput || creatingPhrase}
+                    className={`p-3 rounded-2xl shadow-md transition-all flex-shrink-0 ${
+                      phraseMode
+                        ? "bg-[#C8612D] text-[#F5EFE2]"
+                        : "bg-[#FBF8F0] border border-[#D6CBB0] text-[#1F2A20] hover:border-[#C8612D]"
+                    } disabled:opacity-40`}
+                    title={phraseMode ? "Phrasen-Modus aktiv" : "Phrase üben & sammeln statt chatten"}>
+                    <Sparkles size={18} />
+                  </button>
                   <textarea ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
+                    onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSubmit(); } }}
                     rows={1}
                     placeholder={
-                      translatingInput
+                      creatingPhrase
+                        ? "Übersetze Phrase…"
+                        : translatingInput
                         ? "Übersetze…"
                         : recording && recognitionModeRef.current === "input"
                         ? translateMode ? "Hört zu (Deutsch)…" : `Hört zu (${language.native})…`
+                        : phraseMode
+                        ? "Phrase auf Deutsch — wird übersetzt & vorgelesen"
                         : translateMode
                         ? "Auf Deutsch tippen oder sprechen — wird übersetzt"
                         : `Schreibe oder sprich auf ${language.native}…`
                     }
                     className="flex-1 resize-none px-4 py-3 rounded-2xl bg-[#FBF8F0] border border-[#D6CBB0] text-[15px] text-[#1F2A20] placeholder:text-[#9C927A] focus:outline-none focus:border-[#2D4A36] max-h-32"
-                    style={{ fontFamily: translateMode ? "'Manrope', system-ui, sans-serif" : "'Fraunces', Georgia, serif" }} />
-                  <button onClick={sendMessage} disabled={!input.trim() || loading || translatingInput}
+                    style={{ fontFamily: (translateMode || phraseMode) ? "'Manrope', system-ui, sans-serif" : "'Fraunces', Georgia, serif" }} />
+                  <button onClick={handleSubmit} disabled={!input.trim() || loading || translatingInput || creatingPhrase}
                     className="p-3 rounded-2xl bg-[#1F2A20] text-[#F5EFE2] hover:bg-[#2D4A36] disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-md flex-shrink-0">
-                    {translatingInput ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} />}
+                    {translatingInput || creatingPhrase ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} />}
                   </button>
                 </div>
                 <div className="text-[10px] text-center text-[#9C927A] mt-2 uppercase tracking-wider">
                   {recording && recognitionModeRef.current === "input"
                     ? "🔴 Aufnahme läuft · tippe Mic erneut zum Senden"
+                    : phraseMode
+                    ? `✨ Phrasen-Modus · 🇩🇪 → ${language.flag} ${language.native}`
                     : translateMode
                     ? `🇩🇪 → ${language.flag} Deutsch wird übersetzt`
                     : autoSpeak
@@ -1069,6 +1173,97 @@ Antworte AUSSCHLIESSLICH mit dem JSON, ohne Markdown.`;
               )}
             </div>
           )}
+
+          {activeTab === "phrases" && (
+            <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-6">
+              {phrases.filter(p => p.languageCode === language.code).length === 0 ? (
+                <div className="max-w-md mx-auto text-center py-16 slide-up">
+                  <ListMusic size={36} className="mx-auto text-[#5C5547]/40 mb-4" />
+                  <div className="font-display text-2xl text-[#1F2A20] mb-2">Noch keine Phrasen.</div>
+                  <p className="text-sm text-[#5C5547]">
+                    Aktiviere den ✨ Phrasen-Modus unten und sprich auf Deutsch — z.&nbsp;B. <em>„Ich hätte gerne eine Pizza"</em>.
+                  </p>
+                </div>
+              ) : (
+                <div className="max-w-2xl mx-auto space-y-3">
+                  <div className="text-xs uppercase tracking-wider text-[#5C5547] font-semibold mb-2">
+                    {phrases.filter(p => p.languageCode === language.code).length} Phrasen · {language.native}
+                  </div>
+                  {phrases.filter(p => p.languageCode === language.code).map((p) => (
+                    <div key={p.id} className="bg-[#FBF8F0] border border-[#D6CBB0]/80 rounded-2xl p-4 shadow-sm slide-up">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex-1 min-w-0">
+                          <div className="text-[12px] text-[#5C5547] italic mb-1">
+                            <span className="opacity-60">🇩🇪 </span>{p.german}
+                          </div>
+                          <div className="flex items-start gap-2">
+                            <div className="font-display text-xl text-[#1F2A20] leading-tight flex-1">{p.target}</div>
+                          </div>
+                          <div className="flex items-center gap-2 mt-3">
+                            {ttsSupported && (
+                              <button onClick={() => speak(p.target, `phrase-list-${p.id}`)}
+                                className="flex items-center gap-1 text-[12px] text-[#5C5547] hover:text-[#2D4A36] uppercase tracking-wider">
+                                <Volume2 size={14} className={speakingId === `phrase-list-${p.id}` ? "animate-pulse text-[#C8612D]" : ""} />
+                                <span>Anhören</span>
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                        <button onClick={() => removePhrase(p.id)}
+                          className="p-1.5 rounded-full text-[#9C927A] hover:text-[#C8612D] hover:bg-[#C8612D]/10 flex-shrink-0">
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {currentPhrase && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm"
+          onClick={() => discardPhrase()}>
+          <div className="bg-[#FBF8F0] w-full sm:max-w-lg rounded-t-3xl sm:rounded-3xl p-6 slide-sheet shadow-2xl border border-[#D6CBB0]/60"
+            onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-start justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <Sparkles size={16} className="text-[#C8612D]" />
+                <span className="text-[10px] uppercase tracking-widest text-[#5C5547] font-semibold">Neue Phrase</span>
+              </div>
+              <button onClick={discardPhrase}
+                className="p-1.5 rounded-full hover:bg-[#1F2A20]/8 text-[#5C5547]">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="text-[13px] text-[#5C5547] italic mb-2">
+              <span className="opacity-60">🇩🇪 </span>{currentPhrase.german}
+            </div>
+            <div className="font-display text-2xl sm:text-3xl text-[#1F2A20] leading-tight mb-5">
+              {currentPhrase.target}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {ttsSupported && (
+                <button onClick={() => speak(currentPhrase.target, "phrase-card-tts")}
+                  className="flex items-center gap-2 px-4 py-2 rounded-2xl bg-[#FBF8F0] border border-[#D6CBB0] text-[#1F2A20] hover:border-[#2D4A36] text-sm">
+                  <Volume2 size={16} className={speakingId === "phrase-card-tts" ? "animate-pulse text-[#C8612D]" : ""} />
+                  <span>Nochmal anhören</span>
+                </button>
+              )}
+              <button onClick={discardPhrase}
+                className="flex items-center gap-2 px-4 py-2 rounded-2xl bg-[#FBF8F0] border border-[#D6CBB0] text-[#5C5547] hover:border-[#C8612D] hover:text-[#C8612D] text-sm">
+                <Trash2 size={16} />
+                <span>Verwerfen</span>
+              </button>
+              <button onClick={savePhrase}
+                className="flex items-center gap-2 px-4 py-2 rounded-2xl bg-[#2D4A36] text-[#F5EFE2] hover:bg-[#1F2A20] text-sm ml-auto">
+                <Save size={16} />
+                <span>Sammeln</span>
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
