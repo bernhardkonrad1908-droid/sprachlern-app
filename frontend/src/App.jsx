@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import {
   Send, Sparkles, Globe2, Languages, RotateCcw, Loader2, BookOpen,
   Mic, Volume2, VolumeX, BookMarked, MessageSquare, X, Plus, Check, Trash2,
-  Headphones, RefreshCw, Award,
+  Headphones, RefreshCw, Award, ArrowRightLeft,
 } from "lucide-react";
 
 // Wichtig: API-Endpoint zeigt jetzt auf den Backend-Proxy, nicht direkt zu Anthropic
@@ -89,6 +89,8 @@ export default function App() {
   const [activeTab, setActiveTab] = useState("chat");
   const [wordPopup, setWordPopup] = useState(null);
   const [autoSpeak, setAutoSpeak] = useState(true);
+  const [translateMode, setTranslateMode] = useState(false);
+  const [translatingInput, setTranslatingInput] = useState(false);
 
   const [recording, setRecording] = useState(false);
   const [speakingId, setSpeakingId] = useState(null);
@@ -282,7 +284,28 @@ Verhalten:
   const sendMessage = async () => {
     if (!input.trim() || loading) return;
     if (recording) recognitionRef.current?.stop();
-    const userMsg = { role: "user", content: input.trim() };
+
+    let userContent = input.trim();
+    let germanOriginal = null;
+
+    // Bei Translate-Modus: erst ins Italienische/Spanische/etc. übersetzen
+    if (translateMode) {
+      setTranslatingInput(true);
+      try {
+        const sys = `Du bist ein präziser Übersetzer für Sprachlerner. Übersetze den folgenden deutschen Text ins ${language.native}, natürlich und auf Niveau ${level.code} (${level.name}). Antworte AUSSCHLIESSLICH mit der Übersetzung, ohne Anführungszeichen, ohne Erklärung, ohne Anrede.`;
+        const translated = await callClaude(
+          [{ role: "user", content: userContent }], sys,
+        );
+        germanOriginal = userContent;
+        userContent = translated.trim();
+      } catch {
+        setTranslatingInput(false);
+        return;
+      }
+      setTranslatingInput(false);
+    }
+
+    const userMsg = { role: "user", content: userContent, germanOriginal };
     const newMsgs = [...messages, userMsg];
     setMessages(newMsgs);
     setInput("");
@@ -340,7 +363,7 @@ Verhalten:
     try {
       if (ttsSupported) window.speechSynthesis.cancel();
       recognitionModeRef.current = "input";
-      recognitionRef.current.lang = language.bcp47;
+      recognitionRef.current.lang = translateMode ? "de-DE" : language.bcp47;
       recognitionRef.current.start();
       setRecording(true);
     } catch {}
@@ -788,8 +811,15 @@ Antworte AUSSCHLIESSLICH mit dem JSON, ohne Markdown.`;
                           )}
                         </div>
                       ) : (
-                        <div className="bg-[#1F2A20] text-[#F5EFE2] rounded-2xl rounded-tr-sm px-4 py-3 shadow-sm ml-auto inline-block">
-                          <div className="text-[15px] leading-relaxed whitespace-pre-wrap">{m.content}</div>
+                        <div className="ml-auto inline-block max-w-full">
+                          <div className="bg-[#1F2A20] text-[#F5EFE2] rounded-2xl rounded-tr-sm px-4 py-3 shadow-sm">
+                            <div className="text-[15px] leading-relaxed whitespace-pre-wrap">{m.content}</div>
+                          </div>
+                          {m.germanOriginal && (
+                            <div className="mt-1 mr-1 text-right text-[12px] text-[#5C5547] italic">
+                              <span className="opacity-60">🇩🇪 </span>{m.germanOriginal}
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
@@ -827,25 +857,42 @@ Antworte AUSSCHLIESSLICH mit dem JSON, ohne Markdown.`;
                         recording && recognitionModeRef.current === "input"
                           ? "bg-[#C8612D] text-[#F5EFE2] pulse-ring"
                           : "bg-[#FBF8F0] border border-[#D6CBB0] text-[#1F2A20] hover:border-[#C8612D]"
-                      } disabled:opacity-40`}>
+                      } disabled:opacity-40`}
+                      title={translateMode ? "Auf Deutsch sprechen — wird übersetzt" : "Auf Zielsprache sprechen"}>
                       <Mic size={18} />
                     </button>
                   )}
+                  <button onClick={() => setTranslateMode(!translateMode)}
+                    disabled={loading || translatingInput}
+                    className={`p-3 rounded-2xl shadow-md transition-all flex-shrink-0 ${
+                      translateMode
+                        ? "bg-[#2D4A36] text-[#F5EFE2]"
+                        : "bg-[#FBF8F0] border border-[#D6CBB0] text-[#1F2A20] hover:border-[#2D4A36]"
+                    } disabled:opacity-40`}
+                    title={translateMode ? `Deutsch → ${language.native} an` : "Deutsch tippen/sprechen, automatisch übersetzen"}>
+                    <span className="text-[11px] font-bold tracking-wider">DE→{language.code.toUpperCase()}</span>
+                  </button>
                   <textarea ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)}
                     onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
                     rows={1}
-                    placeholder={recording && recognitionModeRef.current === "input"
-                      ? `Hört zu (${language.native})…`
-                      : `Schreibe oder sprich auf ${language.native}…`}
+                    placeholder={
+                      translatingInput
+                        ? "Übersetze…"
+                        : recording && recognitionModeRef.current === "input"
+                        ? translateMode ? "Hört zu (Deutsch)…" : `Hört zu (${language.native})…`
+                        : translateMode
+                        ? "Auf Deutsch tippen oder sprechen — wird übersetzt"
+                        : `Schreibe oder sprich auf ${language.native}…`
+                    }
                     className="flex-1 resize-none px-4 py-3 rounded-2xl bg-[#FBF8F0] border border-[#D6CBB0] text-[15px] text-[#1F2A20] placeholder:text-[#9C927A] focus:outline-none focus:border-[#2D4A36] max-h-32"
-                    style={{ fontFamily: "'Fraunces', Georgia, serif" }} />
-                  <button onClick={sendMessage} disabled={!input.trim() || loading}
+                    style={{ fontFamily: translateMode ? "'Manrope', system-ui, sans-serif" : "'Fraunces', Georgia, serif" }} />
+                  <button onClick={sendMessage} disabled={!input.trim() || loading || translatingInput}
                     className="p-3 rounded-2xl bg-[#1F2A20] text-[#F5EFE2] hover:bg-[#2D4A36] disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-md flex-shrink-0">
-                    <Send size={18} />
+                    {translatingInput ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} />}
                   </button>
                 </div>
                 <div className="text-[10px] text-center text-[#9C927A] mt-2 uppercase tracking-wider">
-                  {autoSpeak ? "🔊 Auto-Vorlesen aktiv" : "Tippe auf ein Wort um es zu sammeln"}
+                  {translateMode ? `🇩🇪 → ${language.flag} Deutsch wird übersetzt` : autoSpeak ? "🔊 Auto-Vorlesen aktiv" : "Tippe auf ein Wort um es zu sammeln"}
                 </div>
               </div>
             </>
