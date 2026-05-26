@@ -139,24 +139,43 @@ export default function App() {
     rec.onresult = (event) => {
       if (Date.now() < restartCooldownRef.current) return;
 
-      // STATELESS: vollständigen Final-State aus event.results neu berechnen
-      let allFinals = "";
+      // Sammle alle Final-Texts dieser Session, dann Prefix-Dedup:
+      // wenn ein späteres final mit einem früheren beginnt, ersetzt es das frühere.
+      const rawFinals = [];
       let interim = "";
       for (let i = 0; i < event.results.length; i++) {
         const r = event.results[i];
         if (r.isFinal) {
-          allFinals += (allFinals ? " " : "") + r[0].transcript.trim();
+          rawFinals.push(r[0].transcript.trim());
         } else {
           interim = r[0].transcript;
         }
       }
+      // Prefix-Dedup: behalte nur Finals, die NICHT als Prefix eines späteren Finals vorkommen
+      const dedupedFinals = [];
+      for (let i = 0; i < rawFinals.length; i++) {
+        let supersededByLater = false;
+        for (let j = i + 1; j < rawFinals.length; j++) {
+          const a = rawFinals[i].toLowerCase();
+          const b = rawFinals[j].toLowerCase();
+          if (b === a || b.startsWith(a + " ") || b.startsWith(a)) {
+            supersededByLater = true;
+            break;
+          }
+        }
+        if (!supersededByLater) dedupedFinals.push(rawFinals[i]);
+      }
+      let allFinals = dedupedFinals.join(" ");
 
-      // Echo-Schutz: Wenn dies die ersten Finals nach einem Restart sind
-      // UND identisch mit dem letzten Final der vorherigen Session, abziehen
+      // Echo-Schutz aus vorheriger Session (nach Restart)
       if (isFirstFinalAfterRestartRef.current && allFinals && lastSessionFinalTextRef.current) {
-        if (allFinals === lastSessionFinalTextRef.current) {
+        const lower = allFinals.toLowerCase();
+        const lastLower = lastSessionFinalTextRef.current.toLowerCase();
+        if (lower === lastLower) {
           allFinals = "";
-        } else if (allFinals.startsWith(lastSessionFinalTextRef.current + " ")) {
+        } else if (lower.startsWith(lastLower + " ")) {
+          allFinals = allFinals.substring(lastSessionFinalTextRef.current.length).trim();
+        } else if (lower.startsWith(lastLower)) {
           allFinals = allFinals.substring(lastSessionFinalTextRef.current.length).trim();
         }
         isFirstFinalAfterRestartRef.current = false;
