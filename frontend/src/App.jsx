@@ -97,11 +97,13 @@ export default function App() {
   const [ttsUnlocked, setTtsUnlocked] = useState(false);
   const recognitionRef = useRef(null);
   const recognitionModeRef = useRef(null);
-  const userStoppedRef = useRef(false);      // True wenn User Mic manuell stoppt
-  const inputBaseRef = useRef("");           // Bisher gesammelter Input vor letztem Restart
-  const sessionFinalRef = useRef("");        // Finale Transcripts der aktuellen Recognition-Session
-  const sessionInterimRef = useRef("");      // Letzter Interim-Transcript der aktuellen Session
-  const restartCooldownRef = useRef(0);      // Timestamp, bis wann Results nach Restart ignoriert werden
+  const userStoppedRef = useRef(false);
+  const inputBaseRef = useRef("");
+  const sessionFinalRef = useRef("");
+  const sessionInterimRef = useRef("");
+  const restartCooldownRef = useRef(0);
+  const lastSessionFinalTextRef = useRef("");      // Letzter final-Text der vorherigen Session (für Echo-Schutz)
+  const isFirstFinalAfterRestartRef = useRef(false);
   const speechSupported = typeof window !== "undefined" &&
     (window.SpeechRecognition || window.webkitSpeechRecognition);
   const ttsSupported = typeof window !== "undefined" && "speechSynthesis" in window;
@@ -135,29 +137,38 @@ export default function App() {
     rec.interimResults = true;
     rec.maxAlternatives = 1;
     rec.onresult = (event) => {
-      // Cooldown nach Restart: erste 500ms Results ignorieren (Echo-Schutz)
       if (Date.now() < restartCooldownRef.current) return;
 
-      // Nur NEUE results ab resultIndex auswerten
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const result = event.results[i];
-        const text = result[0].transcript;
-        if (result.isFinal) {
-          sessionFinalRef.current += (sessionFinalRef.current && !sessionFinalRef.current.endsWith(" ") ? " " : "") + text.trim();
+      // STATELESS: vollständigen Final-State aus event.results neu berechnen
+      let allFinals = "";
+      let interim = "";
+      for (let i = 0; i < event.results.length; i++) {
+        const r = event.results[i];
+        if (r.isFinal) {
+          allFinals += (allFinals ? " " : "") + r[0].transcript.trim();
+        } else {
+          interim = r[0].transcript;
         }
       }
-      // Aktuellster Interim-Block: letzter non-final transcript
-      let interim = "";
-      for (let i = event.results.length - 1; i >= 0; i--) {
-        if (!event.results[i].isFinal) interim = event.results[i][0].transcript;
-        else break;
+
+      // Echo-Schutz: Wenn dies die ersten Finals nach einem Restart sind
+      // UND identisch mit dem letzten Final der vorherigen Session, abziehen
+      if (isFirstFinalAfterRestartRef.current && allFinals && lastSessionFinalTextRef.current) {
+        if (allFinals === lastSessionFinalTextRef.current) {
+          allFinals = "";
+        } else if (allFinals.startsWith(lastSessionFinalTextRef.current + " ")) {
+          allFinals = allFinals.substring(lastSessionFinalTextRef.current.length).trim();
+        }
+        isFirstFinalAfterRestartRef.current = false;
+      } else if (allFinals) {
+        isFirstFinalAfterRestartRef.current = false;
       }
+
+      sessionFinalRef.current = allFinals;
       sessionInterimRef.current = interim;
 
       if (recognitionModeRef.current === "input") {
-        const combined = sessionFinalRef.current
-          + (sessionFinalRef.current && interim && !sessionFinalRef.current.endsWith(" ") ? " " : "")
-          + interim;
+        const combined = allFinals + (allFinals && interim ? " " : "") + interim;
         setInput(inputBaseRef.current + combined);
       }
       else if (recognitionModeRef.current === "shadowing") {
@@ -177,17 +188,16 @@ export default function App() {
         recognitionModeRef.current = null;
         return;
       }
-      // Input-Mode: bei unfreiwilligem Browser-Cut auto-restart
       if (recognitionModeRef.current === "input" && !userStoppedRef.current) {
-        // Final-Text der gerade beendeten Session in Base persistieren
         if (sessionFinalRef.current) {
           inputBaseRef.current = inputBaseRef.current + sessionFinalRef.current
             + (sessionFinalRef.current.endsWith(" ") ? "" : " ");
+          lastSessionFinalTextRef.current = sessionFinalRef.current;
         }
         sessionFinalRef.current = "";
         sessionInterimRef.current = "";
-        // Cooldown setzen: erste 500ms nach Restart Audio-Echo ignorieren
-        restartCooldownRef.current = Date.now() + 500;
+        isFirstFinalAfterRestartRef.current = true;
+        restartCooldownRef.current = Date.now() + 1000;
         setTimeout(() => {
           if (recognitionRef.current && !userStoppedRef.current
               && recognitionModeRef.current === "input") {
@@ -196,8 +206,8 @@ export default function App() {
               recognitionModeRef.current = null;
             }
           }
-        }, 250);
-        return; // recording bleibt true → UI zeigt weiter Aufnahme an
+        }, 300);
+        return;
       }
       setRecording(false);
       recognitionModeRef.current = null;
@@ -336,11 +346,27 @@ Verhalten:
     }
   };
 
+  // Entfernt aufeinanderfolgende identische Wörter (Safety-Net gegen Mic-Echo)
+  const dedupConsecutiveWords = (text) => {
+    const tokens = text.split(/\s+/).filter(Boolean);
+    const result = [];
+    for (const token of tokens) {
+      const cleanLower = token.replace(/[.,!?;:]+$/, "").toLowerCase();
+      const lastCleanLower = result.length > 0
+        ? result[result.length - 1].replace(/[.,!?;:]+$/, "").toLowerCase()
+        : "";
+      if (cleanLower !== lastCleanLower) {
+        result.push(token);
+      }
+    }
+    return result.join(" ");
+  };
+
   const sendMessage = async () => {
     if (!input.trim() || loading) return;
     if (recording) { userStoppedRef.current = true; recognitionRef.current?.stop(); }
 
-    let userContent = input.trim();
+    let userContent = dedupConsecutiveWords(input.trim());
     let germanOriginal = null;
 
     // Bei Translate-Modus: erst ins Italienische/Spanische/etc. übersetzen
@@ -420,13 +446,14 @@ Verhalten:
       if (ttsSupported) window.speechSynthesis.cancel();
       recognitionModeRef.current = "input";
       userStoppedRef.current = false;
-      // Bestehenden Input erhalten (z.B. wenn User schon was getippt hatte)
       const existing = input.trim();
       inputBaseRef.current = existing ? existing + " " : "";
       sessionFinalRef.current = "";
       sessionInterimRef.current = "";
       restartCooldownRef.current = 0;
-      recognitionRef.current.continuous = true;  // Input: läuft bis User stoppt
+      lastSessionFinalTextRef.current = "";
+      isFirstFinalAfterRestartRef.current = false;
+      recognitionRef.current.continuous = true;
       recognitionRef.current.lang = translateMode ? "de-DE" : language.bcp47;
       recognitionRef.current.start();
       setRecording(true);
