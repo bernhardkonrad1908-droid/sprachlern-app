@@ -97,6 +97,9 @@ export default function App() {
   const [ttsUnlocked, setTtsUnlocked] = useState(false);
   const recognitionRef = useRef(null);
   const recognitionModeRef = useRef(null);
+  const userStoppedRef = useRef(false);      // True wenn User Mic manuell stoppt
+  const inputBaseRef = useRef("");           // Bisher gesammelter Input vor letztem Restart
+  const lastTranscriptRef = useRef("");      // Letzter transcript der aktuellen Session
   const speechSupported = typeof window !== "undefined" &&
     (window.SpeechRecognition || window.webkitSpeechRecognition);
   const ttsSupported = typeof window !== "undefined" && "speechSynthesis" in window;
@@ -132,7 +135,10 @@ export default function App() {
     rec.onresult = (event) => {
       const transcript = Array.from(event.results)
         .map((r) => r[0].transcript).join("");
-      if (recognitionModeRef.current === "input") setInput(transcript);
+      lastTranscriptRef.current = transcript;
+      if (recognitionModeRef.current === "input") {
+        setInput(inputBaseRef.current + transcript);
+      }
       else if (recognitionModeRef.current === "shadowing")
         setShadowing((prev) => prev ? { ...prev, transcript } : prev);
     };
@@ -143,6 +149,26 @@ export default function App() {
           const { words, score } = compareShadowing(s.original, s.transcript || "");
           setShadowing({ ...s, phase: "done", words, score });
         }
+        setRecording(false);
+        recognitionModeRef.current = null;
+        return;
+      }
+      // Input-Mode: bei unfreiwilligem Browser-Cut (Stille-Timeout) auto-restart
+      if (recognitionModeRef.current === "input" && !userStoppedRef.current) {
+        // bisherigen transcript in Base übernehmen
+        inputBaseRef.current = inputBaseRef.current + lastTranscriptRef.current
+          + (lastTranscriptRef.current && !lastTranscriptRef.current.endsWith(" ") ? " " : "");
+        lastTranscriptRef.current = "";
+        setTimeout(() => {
+          if (recognitionRef.current && !userStoppedRef.current
+              && recognitionModeRef.current === "input") {
+            try { recognitionRef.current.start(); } catch {
+              setRecording(false);
+              recognitionModeRef.current = null;
+            }
+          }
+        }, 150);
+        return; // recording bleibt true → UI zeigt weiter Aufnahme an
       }
       setRecording(false);
       recognitionModeRef.current = null;
@@ -283,7 +309,7 @@ Verhalten:
 
   const sendMessage = async () => {
     if (!input.trim() || loading) return;
-    if (recording) recognitionRef.current?.stop();
+    if (recording) { userStoppedRef.current = true; recognitionRef.current?.stop(); }
 
     let userContent = input.trim();
     let germanOriginal = null;
@@ -347,6 +373,7 @@ Verhalten:
     unlockTTS();
     if (!recognitionRef.current) return;
     if (recording) {
+      userStoppedRef.current = true;
       recognitionRef.current.stop();
       return;
     }
@@ -363,6 +390,12 @@ Verhalten:
     try {
       if (ttsSupported) window.speechSynthesis.cancel();
       recognitionModeRef.current = "input";
+      userStoppedRef.current = false;
+      // Bestehenden Input erhalten (z.B. wenn User schon was getippt hatte)
+      const existing = input.trim();
+      inputBaseRef.current = existing ? existing + " " : "";
+      lastTranscriptRef.current = "";
+      recognitionRef.current.continuous = true;  // Input: läuft bis User stoppt
       recognitionRef.current.lang = translateMode ? "de-DE" : language.bcp47;
       recognitionRef.current.start();
       setRecording(true);
@@ -414,7 +447,7 @@ Verhalten:
 
   const startShadowing = async (msgIdx, original) => {
     unlockTTS();
-    if (recording) recognitionRef.current?.stop();
+    if (recording) { userStoppedRef.current = true; recognitionRef.current?.stop(); }
     if (ttsSupported) window.speechSynthesis.cancel();
     setShadowing({ msgIdx, original, phase: "playing", transcript: "", words: null, score: null });
     await speakAndWait(original, 0.85);
@@ -428,6 +461,7 @@ Verhalten:
           stream.getTracks().forEach((t) => t.stop());
         }
         recognitionModeRef.current = "shadowing";
+        recognitionRef.current.continuous = false;  // Shadowing: kurzer Satz, automatisch stoppen
         recognitionRef.current.lang = language.bcp47;
         recognitionRef.current.start();
         setRecording(true);
@@ -514,7 +548,7 @@ Antworte AUSSCHLIESSLICH mit dem JSON, ohne Markdown.`;
 
   const resetAll = () => {
     if (ttsSupported) window.speechSynthesis.cancel();
-    if (recording) recognitionRef.current?.stop();
+    if (recording) { userStoppedRef.current = true; recognitionRef.current?.stop(); }
     setMessages([]); setTranslations({}); setSetupDone(false);
     setInput(""); setStreaming(""); setActiveTab("chat");
     setShadowing(null); lastAutoSpokenIdxRef.current = -1;
@@ -892,7 +926,13 @@ Antworte AUSSCHLIESSLICH mit dem JSON, ohne Markdown.`;
                   </button>
                 </div>
                 <div className="text-[10px] text-center text-[#9C927A] mt-2 uppercase tracking-wider">
-                  {translateMode ? `🇩🇪 → ${language.flag} Deutsch wird übersetzt` : autoSpeak ? "🔊 Auto-Vorlesen aktiv" : "Tippe auf ein Wort um es zu sammeln"}
+                  {recording && recognitionModeRef.current === "input"
+                    ? "🔴 Aufnahme läuft · tippe Mic erneut zum Senden"
+                    : translateMode
+                    ? `🇩🇪 → ${language.flag} Deutsch wird übersetzt`
+                    : autoSpeak
+                    ? "🔊 Auto-Vorlesen aktiv"
+                    : "Tippe auf ein Wort um es zu sammeln"}
                 </div>
               </div>
             </>
